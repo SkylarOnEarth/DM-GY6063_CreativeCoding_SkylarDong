@@ -1,10 +1,9 @@
-///// 
 const eras = [
-  { year: '1980s', title: 'Personal computing', files: ['1980s_01.jpg', '1980s_02.jpg', '1980s_03.jpg'] },
-  { year: '1990s', title: 'The world wide web', files: ['1990s_01.jpg', '1990s_02.jpg', '1990s_03.jpg'] },
-  { year: '2000s', title: 'A connected world',  files: ['2000s_01.jpg', '2000s_02.jpg', '2000s_03.jpg'] },
-  { year: '2010s', title: 'Life on the feed',   files: ['2010s_01.jpg', '2010s_02.jpg', '2010s_03.jpg'] },
-  { year: '2020s', title: 'The synthetic age',  files: ['2020s_01.jpeg', '2020s_02.jpg', '2020s_03.jpg', '2020s_04.jpg'] },
+  { year: '1980s', files: ['1980s_01.jpg', '1980s_02.jpg', '1980s_03.jpg'] },
+  { year: '1990s', files: ['1990s_01.jpg', '1990s_02.jpg', '1990s_03.jpg'] },
+  { year: '2000s',  files: ['2000s_01.jpg', '2000s_02.jpg', '2000s_03.jpg'] },
+  { year: '2010s',   files: ['2010s_01.jpg', '2010s_02.jpg', '2010s_03.jpg'] },
+  { year: '2020s',  files: ['2020s_01.jpeg', '2020s_02.jpg', '2020s_03.jpg', '2020s_04.jpg'] },
 ];
 
 // Initially, I used a centered crop for every image. 
@@ -15,8 +14,8 @@ const eras = [
 // This lets me bring the person or text I want to emphasize
 //  the front center of the sphere while keeping the curved distortion.
 const customCrops = {
-  '2020s_02.jpg': [-150, 10, 800],  
-  '2020s_03.jpg': [90, 90, 960],    
+  '2020s_02.jpg': [-100, 10, 700],  
+  '2020s_03.jpg': [90, 90, 1000],    
   '2020s_04.jpg': [-35, 75, 600],  
 };
 
@@ -33,8 +32,6 @@ const TILT_TO_CAMERA = Math.atan2(CAMERA_HEIGHT, CAMERA_DISTANCE);  // so the ph
 const MESH_ROWS = 32;
 const MESH_COLS = 48;
 
-
-
 const GRAVITY = 4.6;       // really g / L, tuned by eye until the swing felt right
 const SWING_ANGLE = 0.24;  // how far (radians) the outer ball is pulled back
 const TEMPO = 0.85;        // < 1 = a bit slower than "real", reads better on a big wall
@@ -44,11 +41,9 @@ let velocity = 0;
 let movingSide = -1;       // -1 = left balls are swinging, +1 = right balls
 let ballsInMotion = 1;     // 1 or 2
 
-
 let photos = [];           
 let spheres = [];          
 let chosenPhoto = [0, 0, 0, 0, 0];
-let missingFiles = [];
 
 let isPlaying = true;
 let selectedBall = 0;
@@ -56,44 +51,34 @@ let showStrings = true;
 let showSelectionCue = true;
 let cueFadesAt = 0;        // millis() when the selection highlight is gone
 
-///
 function preload() {
   photos = eras.map(era =>
     era.files.map(file =>
-      loadImage('images/' + file, () => {}, () => missingFiles.push(file))
+      loadImage('images/' + file)
     )
   );
 }
 
+///// Use p5.js's WEBGL mode to render the 3D spheres.
+// https://p5js.org/reference/p5/constants/WEBGL/
 function setup() {
   createCanvas(windowWidth, windowHeight, WEBGL);
   pixelDensity(Math.min(window.devicePixelRatio, 2));
   textureMode(NORMAL);
-  noStroke();
 
   // build every sphere once up front, so switching photos is instant
   spheres = photos.map((group, eraIndex) =>
     group.map((img, photoIndex) => buildPhotoSphere(img, eras[eraIndex].files[photoIndex]))
   );
 
-  const loading = document.getElementById('loading');
-  loading.textContent = missingFiles.length ? 'Missing images: ' + missingFiles.join(', ') : '';
-
-  // respect people who asked their system for less motion
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) isPlaying = false;
-
   window.addEventListener('keydown', handleKey);
   updateStatus();
 
-  describe('Five photo-textured pendulums on black. Arrow keys select a ball and its image; ' +
-           '1 or 2 releases one or two balls. H displays controls.');
 }
 
 function draw() {
   if (isPlaying) {
-    // clamp the frame time so a hiccup doesn't make the balls jump
-    const dt = Math.min(deltaTime / 1000, 0.04);
-    stepPendulum(dt * TEMPO);
+    stepPendulum();
   }
 
   background(0);
@@ -115,8 +100,11 @@ function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
 }
 
-
-// ============ drawing ============
+/// I wanted the spheres to feel more three-dimensional, 
+// so I explored p5.js’s WEBGL features and its built-in camera controls. 
+// I used the camera to establish a slightly elevated viewpoint, 
+// then chose orthographic projection to keep the balls 
+// visually consistent in size for the projection composition.
 
 function setUpCamera() {
   // scale so the cradle always fits, whatever the projector resolution is
@@ -177,40 +165,47 @@ function drawBall(ball, i) {
   push();
   translate(ball.x, ball.y, 0);
   rotateX(TILT_TO_CAMERA);
-
-  // if the photo didn't load, fall back to a plain green ball
-  if (img && img.width > 1) texture(img);
-  else ambientMaterial(94, 135, 121);
-
+  texture(img);
   model(spheres[i][chosenPhoto[i]]);
   pop();
 }
 
-
-// ============ physics ============
-
 // Equal masses: whatever hits one end comes out the other end with the
 // same number of balls. So we only ever simulate one pendulum and just
 // switch which side it belongs to every time it passes through the middle.
-function stepPendulum(dt) {
-  // small fixed steps keep the motion smooth and stable
-  const steps = Math.ceil(dt / 0.002);
-  const h = dt / steps;
 
-  for (let s = 0; s < steps; s++) {
-    velocity -= GRAVITY * Math.sin(angle) * h;
-    angle += velocity * h;
+function stepPendulum() {
+  const frameStep = (1 / 60) * TEMPO; //Assume the sketch runs at 60 frames per second.
+  velocity -= GRAVITY * Math.sin(angle) * frameStep;
+  angle += velocity * frameStep;
 
-    const crossedTheMiddle = angle * movingSide < 0;
-    if (crossedTheMiddle) {
-      // collision! hand the motion over to the other side
-      movingSide = -movingSide;
-      angle = 0;
-      // perfectly elastic: the speed you'd get from falling SWING_ANGLE, no energy lost
-      velocity = movingSide * Math.sqrt(2 * GRAVITY * (1 - Math.cos(SWING_ANGLE)));
-    }
+  const crossedTheMiddle = angle * movingSide < 0;
+
+  if (crossedTheMiddle) {
+    movingSide = -movingSide;
+    angle = 0;
+    velocity = movingSide *
+      Math.sqrt(2 * GRAVITY * (1 - Math.cos(SWING_ANGLE)));
   }
-}
+} 
+
+// function stepPendulum(dt) {
+//   // small fixed steps keep the motion smooth and stable
+//   const steps = Math.ceil(dt / 0.002);
+//   const h = dt / steps;
+
+//   for (let s = 0; s < steps; s++) {
+//     velocity -= GRAVITY * Math.sin(angle) * h;
+//     angle += velocity * h;
+
+//     const crossedTheMiddle = angle * movingSide < 0;
+//     if (crossedTheMiddle) {
+//       movingSide = -movingSide; // collision! hand the motion over to the other side
+//       angle = 0; // perfectly elastic: the speed you'd get from falling SWING_ANGLE, no energy lost
+//       velocity = movingSide * Math.sqrt(2 * GRAVITY * (1 - Math.cos(SWING_ANGLE)));
+//     }
+//   }
+// }
 
 function release(howMany) {
   ballsInMotion = howMany;
@@ -218,18 +213,13 @@ function release(howMany) {
   angle = movingSide * SWING_ANGLE;
   velocity = 0;
   isPlaying = true;
-  updateStatus();
 }
 
-
-// ============ keyboard ============
 
 const KEYS_WE_USE = ['arrowleft', 'arrowright', 'arrowup', 'arrowdown', '1', '2', ' ', 'r', 'f', 'l', 'g', 'h'];
 
 function handleKey(event) {
   const key = event.key.toLowerCase();
-
-  // leave browser shortcuts (cmd+R etc.) alone
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   if (!KEYS_WE_USE.includes(key)) return;
 
@@ -272,8 +262,6 @@ function changePhoto(step) {
   flashCue();
 }
 
-
-////????
 function flashCue() {
   cueFadesAt = millis() + 1000;
 }
@@ -283,13 +271,15 @@ function toggleHelp() {
   help.hidden = !help.hidden;
 }
 
+
 function toggleFullscreen() {
-  const request = document.fullscreenElement
-    ? document.exitFullscreen()
-    : document.documentElement.requestFullscreen();
-  // if the browser says no, at least show the help so we know something happened
-  request.catch(() => { document.getElementById('help').hidden = false; });
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    document.documentElement.requestFullscreen();
+  }
 }
+
 
 function updateStatus() {
   const era = eras[selectedBall];
@@ -304,16 +294,13 @@ function wrap(n, total) {
   return (n + total) % total;
 }
 
-
-///////////the photo sphere
-
 ////Builds a sphere and wraps the photo around its front half.
 ////The UVs are based on angles, not flat projection, so the picture bends
 ///like it's seen through a fisheye lens, with the subject right in the middle.
 
 function buildPhotoSphere(img, fileName) {
-  const w = img.width || 1;
-  const h = img.height || 1;
+  const w = img.width;
+  const h = img.height;
 
   // default: the biggest centered square
   const shortSide = Math.min(w, h);
@@ -335,7 +322,8 @@ function buildPhotoSphere(img, fileName) {
       mesh.vertices.push(createVector(x * BALL_RADIUS, y * BALL_RADIUS, z * BALL_RADIUS));
       mesh.vertexNormals.push(createVector(x, y, z));
 
-      // abs(z) mirrors the back onto the front, so there's no ugly seam behind the ball
+      // abs(z) mirrors the back onto the front, 
+      // so there's no ugly seam behind the ball
       const u = 0.5 + Math.atan2(x, Math.abs(z)) / Math.PI;
       const v = 0.5 + Math.asin(constrain(y, -1, 1)) / Math.PI;
       mesh.uvs.push((cropX + u * cropSize) / w, (cropY + v * cropSize) / h);
