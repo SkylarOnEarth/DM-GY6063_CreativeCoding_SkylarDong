@@ -1,3 +1,6 @@
+// Since I divide the images into different groups according to era, 
+// Everytime I wanna change something, it's more likely to change the whole group
+// Using 'const' instead of 'let' could reduce a lot of workload
 const eras = [
   { year: '1980s', files: ['1980s_01.jpg', '1980s_02.jpg', '1980s_03.jpg'] },
   { year: '1990s', files: ['1990s_01.jpg', '1990s_02.jpg', '1990s_03.jpg'] },
@@ -5,6 +8,7 @@ const eras = [
   { year: '2010s',   files: ['2010s_01.jpg', '2010s_02.jpg', '2010s_03.jpg'] },
   { year: '2020s',  files: ['2020s_01.jpeg', '2020s_02.jpg', '2020s_03.jpg', '2020s_04.jpg'] },
 ];
+
 
 // Initially, I used a centered crop for every image. 
 // But once the images were mapped onto the spheres, 
@@ -59,20 +63,20 @@ function preload() {
   );
 }
 
-function preload() {
-  photos = [];                                   // prepare a big array
-  for (let i = 0; i < eras.length; i++) {        //  era i
-    const oneEra = [];                           // prepare a small array for each ball 
+// function preload() {
+//   photos = [];                                   // prepare a big array
+//   for (let i = 0; i < eras.length; i++) {        //  era i
+//     const oneEra = [];                           // prepare a small array for each ball 
 
-    for (let j = 0; j < eras[i].files.length; j++) {   // image j in ara i
-      const file = eras[i].files[j];             // got the image using i & j
-      const img = loadImage('images/' + file);   
-      oneEra.push(img);                          // put the image into the small array
-    }
+//     for (let j = 0; j < eras[i].files.length; j++) {   // image j in ara i
+//       const file = eras[i].files[j];             // got the image using i & j
+//       const img = loadImage('images/' + file);   
+//       oneEra.push(img);                          // put the image into the small array
+//     }
 
-    photos.push(oneEra);                         // put small array into big array
-  }
-}
+//     photos.push(oneEra);                         // put small array into big array
+//   }
+// }
 
 ///// Use p5.js's WEBGL mode to render the 3D spheres.
 // https://p5js.org/reference/p5/constants/WEBGL/
