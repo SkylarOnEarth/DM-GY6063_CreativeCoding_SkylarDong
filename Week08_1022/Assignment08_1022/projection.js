@@ -19,7 +19,7 @@ const customCrops = {
   '2020s_04.jpg': [-35, 75, 600],  
 };
 
-const BALL_RADIUS = 43;
+const BALL_RADIUS = 43; 
 const STRING_LENGTH = 600;
 const PIVOT_Y = 65 - STRING_LENGTH;
 
@@ -52,11 +52,26 @@ let showSelectionCue = true;
 let cueFadesAt = 0;        // millis() when the selection highlight is gone
 
 function preload() {
-  photos = eras.map(era =>
-    era.files.map(file =>
+  photos = eras.map(era => // go through each era
+    era.files.map(file => 
       loadImage('images/' + file)
     )
   );
+}
+
+function preload() {
+  photos = [];                                   // prepare a big array
+  for (let i = 0; i < eras.length; i++) {        //  era i
+    const oneEra = [];                           // prepare a small array for each ball 
+
+    for (let j = 0; j < eras[i].files.length; j++) {   // image j in ara i
+      const file = eras[i].files[j];             // got the image using i & j
+      const img = loadImage('images/' + file);   
+      oneEra.push(img);                          // put the image into the small array
+    }
+
+    photos.push(oneEra);                         // put small array into big array
+  }
 }
 
 ///// Use p5.js's WEBGL mode to render the 3D spheres.
