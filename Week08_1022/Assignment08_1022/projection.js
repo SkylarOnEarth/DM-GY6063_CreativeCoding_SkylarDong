@@ -193,6 +193,9 @@ function drawBall(ball, i) {
 // same number of balls. So we only ever simulate one pendulum and just
 // switch which side it belongs to every time it passes through the middle.
 
+// I made a connection between the velocity and the sin math,
+// basically, the closer the angle gets to 0, the closer velovity gets to 0
+// and the angle is decided by velocity and how many frames the sketch runs per second. 
 function stepPendulum() {
   const frameStep = (1 / 60) * TEMPO; //Assume the sketch runs at 60 frames per second.
   velocity -= GRAVITY * Math.sin(angle) * frameStep;
@@ -226,6 +229,7 @@ function stepPendulum() {
 //   }
 // }
 
+// 
 function release(howMany) {
   ballsInMotion = howMany;
   movingSide = -1;              // always pull back from the left
