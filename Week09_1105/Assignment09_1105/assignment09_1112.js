@@ -8,37 +8,34 @@
 // and ml5 watches it to find hands.
 let mirror;
 // [ML5] The handPose model. It "reads palms": finds hands and 21 points on each.
-// Made in setup(). pokePalmReader() wakes it up if it gets stuck.
 let palmReader;
 
 // [ML5] The latest hands ml5 found (an array, one item per hand).
 // Written by handsSpotted(), read by readPalms() every frame.
 let handsUp = [];
 
-// Is the model ready? Before it is: no stuck-check, and the tip says LOADING.
+// Is the model ready? Before it is, the tip says LOADING.
 let palmReaderAwake = false;
 
-// Camera image size. ml5 gives hand points inside this 640×480 space.
+// Camera size = canvas size = 640×480.
+// ml5 gives hand points in this same 640×480 space, so the camera,
+// the hands and the canvas all share the same positions. No converting needed.
 const MIRROR_W = 640;
 const MIRROR_H = 480;
 
-// The camera is 640×480, but the screen is bigger and a different shape.
-// To fill the screen without stretching, we scale up (zoomIn) and then
-// move it to the center (nudgeX / nudgeY). fitMirror() calculates these.
-// We use them to draw the camera AND to move hand points onto the screen.
-let zoomIn = 1; // how much to scale up
-let nudgeX = 0; // how far to move left/right
-let nudgeY = 0; // how far to move up/down
 let rawMe;
 let glamMe; // Every pixel recolored.
 let portals = [];
+
+// The gradient color for each of the 640 columns, worked out once in setup()
+let sunset = [];
 
 // Pixel squares that fly out after a smash:
 // { x, y position, vx, vy speed, size, c color, life 1 → 0 }
 let glitter = [];
 
 // The frame you are pulling right now, not placed yet:
-// { ax, ay, bx, by } = where the two pinch points are. null when not pulling.
+// { a, b } = the two pinch points. null when not pulling.
 let babyPortal = null;
 
 // How many frames (of animation) you have been pulling.
@@ -55,18 +52,10 @@ let paparazzi = 0;  // white flash
 
 // Each hand's "mood" (its state), saved separately for left and right hand.
 // Why: ml5 only tells us where the hand is NOW. It doesn't remember the past.
-// But to know "still pinching", "how big was the hand when the push started",
+// But to know "still pinching", "how big was the hand last frame",
 // or "just made a fist", we need to remember.
 const handMood = {};
 const HOT_PINK = [255, 20, 200];
-
-// Gradient colors for the glam look (from left to right of the screen).
-// pos = place on screen (0 left → 1 right), color = color at that place
-const SUNSET_STOPS = [
-  { pos: 0.0, color: [45, 8, 120] },    // deep purple
-  { pos: 0.4, color: [255, 75, 230] },  // magenta pink
-  { pos: 1.0, color: [255, 245, 45] }   // yellow
-];
 
 // ----- Gesture settings (change these if it feels too easy or too hard) -----
 // All distances are divided by "palm size", so the same numbers work
@@ -74,11 +63,14 @@ const SUNSET_STOPS = [
 
 // Thumb tip to index tip distance smaller than this → pinching
 // (bigger number = easier to pinch)
-const PINCH_YES = 0.45; // Bigger than this then cannot pinch anymore
-const PINCH_NO = 0.65; // The pinch point must be at least this far from the palm center
+const PINCH_YES = 0.45;
+// Bigger than this → not pinching anymore
+const PINCH_NO = 0.65;
+// The pinch point must be at least this far from the palm center.
 // This tells a pinch apart from a fist
 // (pinch: fingertips stick out; fist: fingertips are tucked in).
-const FINGERS_OUT = 0.6; // Finger curl smaller than this = fist
+const FINGERS_OUT = 0.6;
+// Finger curl smaller than this = fist
 const FIST_MODE = 1.2;
 // Finger curl bigger than this = open hand
 const HIGH_FIVE = 1.6;
@@ -106,13 +98,13 @@ const BONES = [
 
 
 // ---------------------------------------------------------------------
-// 2. Setup: runs once
+// 1. Setup: runs once
 // ---------------------------------------------------------------------
 
 // Built into p5: runs once at the start.
 // "async" lets us use "await" to wait for the ml5 model to load.
 async function setup() {
-  createCanvas(windowWidth, windowHeight);
+  createCanvas(MIRROR_W, MIRROR_H); // same size as the camera (index.html centers it)
 
   // Two 640×480 images: raw me and glam me.
   // pixelDensity(1) keeps the pixel array exactly 640×480,
@@ -120,7 +112,17 @@ async function setup() {
   rawMe = createGraphics(MIRROR_W, MIRROR_H);
   rawMe.pixelDensity(1);
   glamMe = createImage(MIRROR_W, MIRROR_H);
-  fitMirror();
+
+  // Gradient from left to right: purple → pink (at 40%) → yellow.
+  // It only changes from left to right, so work out the 640 column colors once here.
+  const PURPLE = color(45, 8, 120);
+  const PINK = color(255, 75, 230);
+  const YELLOW = color(255, 245, 45);
+  for (let x = 0; x < MIRROR_W; x++) {
+    const u = x / MIRROR_W; // 0 left → 1 right
+    const c = u < 0.4 ? lerpColor(PURPLE, PINK, u / 0.4) : lerpColor(PINK, YELLOW, (u - 0.4) / 0.6);
+    sunset[x] = [red(c), green(c), blue(c)];
+  }
 
   // Open the webcam and ask for 640×480 (4:3).
   // Otherwise a Mac usually gives 16:9, which gets squished to 4:3,
@@ -163,25 +165,10 @@ function waitForMirror() {
   });
 }
 
-let lastHeardFromHands = 0;
 
-// Watchdog: sometimes the tracking loop quietly stops after an error,
-// and hands are never found again. draw() checks every frame:
-// if there's been no result for 2 seconds, restart tracking.
-//
-// [ML5] This uses two internal ml5 variables: detecting and signalStop.
-// They are NOT in the official docs — I found them in the ml5 1.x source code.
-// If detecting is still true, detectStart() thinks the loop is running
-// and won't restart, so we set both back to false first.
-// Source: https://github.com/ml5js/ml5-next-gen (src/HandPose/index.js)
-function pokePalmReader() {
-  if (!palmReaderAwake) return;
-  if (millis() - lastHeardFromHands < 2000) return;
-  lastHeardFromHands = millis();
-  palmReader.detecting = false;
-  palmReader.signalStop = false;
-  palmReader.detectStart(mirror, handsSpotted);
-}
+// ---------------------------------------------------------------------
+// 2. Talking to ml5
+// ---------------------------------------------------------------------
 
 // [ML5] The callback for detectStart: ml5 calls it every time it finishes.
 // results is an array, one item per hand, with:
@@ -189,7 +176,6 @@ function pokePalmReader() {
 //   handedness → "Left" or "Right"
 // Source: https://docs.ml5js.org/#/reference/handpose
 function handsSpotted(results) {
-  lastHeardFromHands = millis(); // tell the watchdog ml5 is still alive
   handsUp = calmShakyHands(results, handsUp);
 }
 
@@ -211,42 +197,13 @@ function calmShakyHands(fresh, previous) {
 
 
 // ---------------------------------------------------------------------
-// 4. Make the camera fill the screen
-// ---------------------------------------------------------------------
-
-// Calculate zoomIn / nudgeX / nudgeY (like CSS object-fit: cover).
-// Scale by whichever side needs more, so the whole screen is covered.
-// Split the extra part equally on both sides, so the image is centered.
-function fitMirror() {
-  zoomIn = max(width / MIRROR_W, height / MIRROR_H);
-  nudgeX = (width - MIRROR_W * zoomIn) / 2;
-  nudgeY = (height - MIRROR_H * zoomIn) / 2;
-}
-
-// Built into p5: runs when the browser window changes size.
-// Resize the canvas and recalculate the fill numbers.
-function windowResized() {
-  resizeCanvas(windowWidth, windowHeight);
-  fitMirror();
-}
-
-// Draw a 640×480 image to fill the screen, using fitMirror()'s numbers.
-// Both the background (rawMe) and the frames (glamMe) use this,
-// so the two images always line up exactly.
-function paintFullscreen(img) {
-  image(img, nudgeX, nudgeY, MIRROR_W * zoomIn, MIRROR_H * zoomIn);
-}
-
-
-// ---------------------------------------------------------------------
-// 5. Every frame: draw()
+// 3. Every frame: draw()
 // ---------------------------------------------------------------------
 
 // Built into p5: runs about 60 times per second.
 // Order matters: things drawn later sit on top.
 function draw() {
-  pokePalmReader();         // first, check if ml5 is stuck
-  const camOK = glamUp();   // recolor this frame (false if the camera has no picture yet)
+  const camOK = glamUp(); // recolor this frame (false if the camera has no picture yet)
 
   background(0);
 
@@ -256,7 +213,7 @@ function draw() {
   if (earthquake > 0.5) translate(random(-earthquake, earthquake), random(-earthquake, earthquake));
 
   // ① Background: raw me
-  if (camOK) paintFullscreen(rawMe);
+  if (camOK) image(rawMe, 0, 0);
 
   // ② Read hands → decide to draw, push, or smash a frame
   const info = readPalms();
@@ -295,7 +252,7 @@ function draw() {
 
 
 // ---------------------------------------------------------------------
-// 6. Pixel array: give the image a glam look (the assignment's pixel array part)
+// 4. Pixel array: give the image a glam look (the assignment's pixel array part)
 // ---------------------------------------------------------------------
 
 // Read every pixel of rawMe, recolor it by brightness, and write it into glamMe.
@@ -311,25 +268,8 @@ function glamUp() {
   glamMe.loadPixels();
 
   const src = rawMe.pixels; // read: raw me
-  const a = glamMe.pixels;  // write: glam me
+  const out = glamMe.pixels; // write: glam me
 
-  // The gradient only changes from left to right, so every pixel in one
-  // column has the same color. Work out the 640 column colors once,
-  // instead of 640 × 480 = 307,200 times.
-  const colR = new Array(MIRROR_W);
-  const colG = new Array(MIRROR_W);
-  const colB = new Array(MIRROR_W);
-  for (let x = 0; x < MIRROR_W; x++) {
-    // u = where this column is on the screen (0 left → 1 right).
-    // Using the screen (not 640) makes the gradient cross the whole screen.
-    const u = constrain((x * zoomIn + nudgeX) / width, 0, 1);
-    const c = sunsetAt(u);
-    colR[x] = c[0];
-    colG[x] = c[1];
-    colB[x] = c[2];
-  }
-
-  // Go through every pixel
   for (let y = 0; y < MIRROR_H; y++) {
     for (let x = 0; x < MIRROR_W; x++) {
       // The pixel array is one long list. Each pixel uses 4 spots: R, G, B, A.
@@ -343,14 +283,12 @@ function glamUp() {
       //   smooth in between
       const k = constrain((brightness - 90) / 40, 0, 1) * 0.85 + 0.15;
 
-      const r = colR[x] * k;
-      const g = colG[x] * k;
-      const bl = colB[x] * k;
-
-      a[i] = r;
-      a[i + 1] = g;
-      a[i + 2] = bl;
-      a[i + 3] = 255; // fully visible
+      // This column's gradient color × brightness multiplier
+      const c = sunset[x];
+      out[i] = c[0] * k;
+      out[i + 1] = c[1] * k;
+      out[i + 2] = c[2] * k;
+      out[i + 3] = 255; // fully visible
     }
   }
 
@@ -358,35 +296,16 @@ function glamUp() {
   return true;
 }
 
-// Give a position u (0 ~ 1), get the gradient color there as [r, g, b].
-// How: find which two color stops u is between, then mix them (lerp).
-function sunsetAt(u) {
-  for (let s = 0; s < SUNSET_STOPS.length - 1; s++) {
-    const a = SUNSET_STOPS[s];
-    const b = SUNSET_STOPS[s + 1];
-    if (u <= b.pos) {
-      // t = how far u is between these two stops (0 ~ 1)
-      const t = (u - a.pos) / max(b.pos - a.pos, 0.0001); // max avoids dividing by 0
-      return [
-        lerp(a.color[0], b.color[0], t),
-        lerp(a.color[1], b.color[1], t),
-        lerp(a.color[2], b.color[2], t)
-      ];
-    }
-  }
-  return SUNSET_STOPS[SUNSET_STOPS.length - 1].color; // safety: use the last color
-}
-
 
 // ---------------------------------------------------------------------
-// 7. Read hands: turn ml5's raw data into easy-to-use info
+// 5. Read hands: turn ml5's raw data into easy-to-use info
 // ---------------------------------------------------------------------
 
 // Called once per frame in draw().
 // In:  handsUp (ml5 results)
 // Out: an array with one "card" h per hand, used by pinchAndStretch,
 //      pushOrPunch and drawBones:
-//   h.k        21 points (already in screen position)
+//   h.k        21 points (x, y on the canvas)
 //   h.size     palm size
 //   h.curl     how curled the fingers are
 //   h.palm     palm center
@@ -394,23 +313,17 @@ function sunsetAt(u) {
 //   h.pinching is it pinching? (true / false)
 //   h.pinchPt  middle point between thumb tip and index tip = frame corner
 function readPalms() {
-  const seen = new Set(); // which hands showed up this frame (to clean up the rest)
+  const seen = []; // which hands showed up this frame (to clean up the rest)
 
-  const out = handsUp.map((h, idx) => {
+  const out = handsUp.map((h) => {
     // [ML5] Use handedness ("Left" / "Right") as the hand's name,
     // so every frame we find the same hand's mood in handMood.
-    // If both hands get the same name, add a number to tell them apart.
-    let id = h.handedness || "hand";
-    if (seen.has(id)) id += idx;
-    seen.add(id);
+    const id = h.handedness;
+    seen.push(id);
 
-    // [ML5] keypoints are in 640×480 space. Move them onto the screen
-    // the same way as the image (scale by zoomIn, then nudge),
-    // so the hand lines up with the picture.
-    const k = h.keypoints.map((p) => ({
-      x: p.x * zoomIn + nudgeX,
-      y: p.y * zoomIn + nudgeY
-    }));
+    // [ML5] the 21 keypoints. They are already in canvas positions
+    // (canvas and camera are both 640×480), so we can use them directly.
+    const k = h.keypoints;
 
     // Palm size = distance from wrist (0) to middle finger base (9).
     // Closer to the camera = bigger number. Pushing uses this.
@@ -425,24 +338,20 @@ function readPalms() {
 
     // Palm center = average of the wrist and the 4 finger bases (0, 5, 9, 13, 17).
     // Used to check if the palm is over a frame.
-    let px = 0;
-    let py = 0;
-    for (const t of [0, 5, 9, 13, 17]) {
-      px += k[t].x;
-      py += k[t].y;
-    }
-    const palm = { x: px / 5, y: py / 5 };
+    const palm = {
+      x: (k[0].x + k[5].x + k[9].x + k[13].x + k[17].x) / 5,
+      y: (k[0].y + k[5].y + k[9].y + k[13].y + k[17].y) / 5
+    };
 
     // First time we see this hand: give it a mood.
     //   pinching   is it pinching now?
     //   pushFrame  which frame it's pushing (null = none)
-    //   baseline   palm size when the push started (to see how much it grew)
-    //   startDepth how far the frame was when the push started
+    //   lastSize   palm size last frame (to see if the hand is moving closer)
     //   fistArmed  can it smash? (after a smash, open your hand before
     //              smashing again, so one fist can't smash many frames)
     //   fistCount  how many frames in a row it's been a fist
     if (!handMood[id]) {
-      handMood[id] = { pinching: false, pushFrame: null, baseline: 0, startDepth: 0, fistArmed: true, fistCount: 0 };
+      handMood[id] = { pinching: false, pushFrame: null, lastSize: size, fistArmed: true, fistCount: 0 };
     }
     const st = handMood[id];
 
@@ -465,14 +374,9 @@ function readPalms() {
   });
 
   // Hands that didn't show up this frame (e.g. moved out of view):
-  // reset their mood, so when they come back they don't continue
-  // an old push, fist, or pinch.
+  // forget their mood, so when they come back they start fresh.
   for (const id in handMood) {
-    if (!seen.has(id)) {
-      handMood[id].pushFrame = null;
-      handMood[id].fistCount = 0;
-      handMood[id].pinching = false;
-    }
+    if (!seen.includes(id)) delete handMood[id];
   }
 
   return out;
@@ -480,7 +384,7 @@ function readPalms() {
 
 
 // ---------------------------------------------------------------------
-// 8. 🤏🤏 Draw a frame with two hands
+// 6. 🤏🤏 Draw a frame with two hands
 // ---------------------------------------------------------------------
 
 // Called every frame in draw(). info comes from readPalms().
@@ -493,19 +397,9 @@ function pinchAndStretch(info) {
   const p = info.filter((h) => h.pinching).sort((a, b) => a.pinchPt.x - b.pinchPt.x);
 
   if (p.length >= 2) {
-    const a = p[0].pinchPt;
-    const b = p[1].pinchPt;
-    if (!babyPortal) {
-      // Just started: put the two corners right on the pinch points
-      babyPortal = { ax: a.x, ay: a.y, bx: b.x, by: b.y };
-    } else {
-      // While pulling: corners move halfway to the pinch points each frame,
-      // so the frame edges move smoothly instead of shaking
-      babyPortal.ax = lerp(babyPortal.ax, a.x, 0.5);
-      babyPortal.ay = lerp(babyPortal.ay, a.y, 0.5);
-      babyPortal.bx = lerp(babyPortal.bx, b.x, 0.5);
-      babyPortal.by = lerp(babyPortal.by, b.y, 0.5);
-    }
+    // The two corners are right on the pinch points
+    // (the hands are already smoothed by calmShakyHands, so no extra smoothing)
+    babyPortal = { a: p[0].pinchPt, b: p[1].pinchPt };
     stretchTime++;
     letGoTimer = 0;
   } else if (babyPortal) {
@@ -521,16 +415,12 @@ function pinchAndStretch(info) {
   }
 }
 
-// Turn the two corners (ax, ay), (bx, by) into a rectangle { x, y, w, h }.
+// Turn the two corners a and b into a rectangle { x, y, w, h }.
 // min and abs are needed because hands can cross or be one above the other,
 // so "a" is not always the top-left corner.
 function babyPortalBox() {
-  return {
-    x: min(babyPortal.ax, babyPortal.bx),
-    y: min(babyPortal.ay, babyPortal.by),
-    w: abs(babyPortal.bx - babyPortal.ax),
-    h: abs(babyPortal.by - babyPortal.ay)
-  };
+  const { a, b } = babyPortal;
+  return { x: min(a.x, b.x), y: min(a.y, b.y), w: abs(b.x - a.x), h: abs(b.y - a.y) };
 }
 
 // A frame is born: skip it if it's too small, otherwise add it to portals.
@@ -542,13 +432,18 @@ function birthPortal(r) {
 
 
 // ---------------------------------------------------------------------
-// 9. ✋ Push / ✊ Smash (one hand)
+// 7. ✋ Push / ✊ Smash (one hand)
 // ---------------------------------------------------------------------
 
 // Called every frame in draw(). Checks each hand on its own.
 function pushOrPunch(info) {
   for (const h of info) {
     const st = h.st;
+
+    // How much bigger the palm got since last frame (0.02 = 2% bigger).
+    // A hand moving toward the camera gets bigger.
+    const grow = h.size / st.lastSize - 1;
+    st.lastSize = h.size;
 
     // Pulling a frame, or this hand is pinching: no push or smash
     // (otherwise you could smash by accident while drawing)
@@ -575,32 +470,14 @@ function pushOrPunch(info) {
       if (h.curl > 1.4) st.fistArmed = true; // hand opened a bit → "unlock"
     }
 
-    // ✋ Push: an open hand moving toward the camera looks bigger
-    // → the frame moves away
+    // ✋ Push: open palm over a frame → lock onto that frame.
+    // Every frame the palm gets bigger (moves closer), the frame moves away.
+    // Growth under 1% is ignored, so small tracking shakes don't push it.
+    // Moving the hand back does nothing, so you can push again and again.
     if (h.curl > HIGH_FIVE) {
-      if (!st.pushFrame || st.pushFrame.dead) {
-        // Not pushing yet: open palm over a frame → lock onto that frame,
-        // and remember the palm size (baseline) and frame distance (startDepth)
-        if (target) {
-          st.pushFrame = target;
-          st.baseline = h.size;
-          st.startDepth = target.depth;
-        }
-      } else {
-        // Pushing:
-        // Hand moves back (gets smaller) → reset the starting point,
-        // so the next push can send the frame even farther
-        if (h.size < st.baseline) {
-          st.baseline = h.size;
-          st.startDepth = st.pushFrame.depth;
-        }
-        // How much bigger the hand is than at the start
-        // (must be over 5%, to ignore small tracking shakes)
-        const grow = max(0, h.size / st.baseline - 1.05);
-        // The frame only goes farther, never springs back (that's why max)
-        st.pushFrame.depth = max(st.pushFrame.depth, st.startDepth + grow * SHOVE_POWER);
-        st.pushFrame.hover = 1;
-      }
+      if (!st.pushFrame || st.pushFrame.dead) st.pushFrame = target;
+      else if (grow > 0.01) st.pushFrame.depth += grow * SHOVE_POWER;
+      if (st.pushFrame) st.pushFrame.hover = 1;
     } else {
       st.pushFrame = null; // hand not open anymore → stop pushing
     }
@@ -609,12 +486,12 @@ function pushOrPunch(info) {
 
 
 // ---------------------------------------------------------------------
-// 10. Frames: position, update, draw
+// 8. Frames: position, update, draw
 // ---------------------------------------------------------------------
 
-// Work out where a frame is on screen right now.
+// Work out where a frame is on the canvas right now.
 // When pushed away: it gets smaller (s goes down) and slides a bit toward
-// the screen center, so it looks like it's really moving back.
+// the canvas center, so it looks like it's really moving back.
 // pushOrPunch, portalUnder, drawPortal and smash all use this.
 function whereIsPortal(f) {
   const s = 1 / (1 + f.shown); // shown = 0 → full size; bigger → smaller
@@ -650,59 +527,44 @@ function agePortal(f) {
   if (f.fade <= 0) f.dead = true;
 }
 
-// Draw a frame: show glam me inside it, then add a pink border
+// Show the part of glam me that sits inside rectangle r.
+// image() with 9 numbers = take the r part of glamMe and draw it at the same r
+// on the canvas, so it lines up perfectly with the background.
+function showGlam(r) {
+  image(glamMe, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h);
+}
+
+// Draw a frame: glam me inside, pink border around
 function drawPortal(f) {
   const r = whereIsPortal(f);
-  const ctx = drawingContext; // p5's Canvas 2D "pen", for things p5 can't do itself
-
   push();
-  ctx.globalAlpha = max(f.fade, 0); // the whole frame fades together
-
-  // clip: make a rectangle path; after this, things only show inside it.
-  // So paintFullscreen draws the whole image, but only the part inside
-  // the frame shows — and it lines up perfectly with the background.
-  ctx.beginPath();
-  ctx.rect(r.x, r.y, r.w, r.h);
-  ctx.clip();
-  paintFullscreen(glamMe);
-  pop(); // pop removes the clip, so nothing after is affected
-
-  // Pink border; thicker when a palm is on it (hover)
-  push();
+  tint(255, 255 * f.fade); // the picture fades with the frame
+  showGlam(r);
   noFill();
   stroke(HOT_PINK[0], HOT_PINK[1], HOT_PINK[2], 255 * f.fade);
-  strokeWeight(2 + f.hover * 3);
+  strokeWeight(2 + f.hover * 3); // thicker when a palm is on it
   rect(r.x, r.y, r.w, r.h);
   pop();
 }
 
-// Draw the frame being pulled: same as drawPortal (shows glam me),
+// Draw the frame being pulled: same as drawPortal,
 // but with a dashed border to show it's not placed yet
 function drawBabyPortal() {
   if (!babyPortal) return;
   const r = babyPortalBox();
-  const ctx = drawingContext;
-
   push();
-  ctx.beginPath();
-  ctx.rect(r.x, r.y, r.w, r.h);
-  ctx.clip();
-  paintFullscreen(glamMe);
-  pop();
-
-  push();
+  showGlam(r);
   noFill();
   stroke(HOT_PINK);
   strokeWeight(2);
-  ctx.setLineDash([10, 8]); // dashed line: 10 px on, 8 px off
+  drawingContext.setLineDash([10, 8]); // dashed line: 10 px on, 8 px off (pop turns it off)
   rect(r.x, r.y, r.w, r.h);
-  ctx.setLineDash([]);      // back to a solid line for everything after
   pop();
 }
 
 
 // ---------------------------------------------------------------------
-// 11. Smash: the frame bursts into colorful pixel squares
+// 9. Smash: the frame bursts into colorful pixel squares
 // ---------------------------------------------------------------------
 
 // Called by pushOrPunch(). f = the frame, impact = where the fist (palm) is
@@ -713,8 +575,7 @@ function smash(f, impact) {
     const x = random(r.x, r.x + r.w);
     const y = random(r.y, r.y + r.h);
     // Square color = glam me's color at this point
-    // (change the screen position back to 640×480 first, then get the color)
-    const c = glamMe.get(floor((x - nudgeX) / zoomIn), floor((y - nudgeY) / zoomIn));
+    const c = glamMe.get(floor(x), floor(y));
     // Direction = from the fist to this point → it bursts out from the fist
     const angle = atan2(y - impact.y, x - impact.x);
     const speed = random(4, 14);
@@ -742,7 +603,7 @@ function fallGlitter() {
 
 
 // ---------------------------------------------------------------------
-// 12. Top layer: hand skeleton + tip
+// 10. Top layer: hand skeleton + tip
 // ---------------------------------------------------------------------
 
 // [ML5] Draw the 21 handPose points as a skeleton.
@@ -768,13 +629,13 @@ function drawBones(info) {
     strokeWeight(2.5);
     for (const [a, b] of BONES) line(k[a].x, k[a].y, k[b].x, k[b].y);
 
-    // Joints: black center + pink ring. The 5 fingertips (4, 8, 12, 16, 20) are bigger.
+    // Joints: black center + pink ring.
+    // Fingertips are 4, 8, 12, 16, 20 (every 4th point) → draw them bigger.
     stroke(HOT_PINK);
     strokeWeight(3);
     fill(0);
     for (let i = 0; i < k.length; i++) {
-      const tip = i === 4 || i === 8 || i === 12 || i === 16 || i === 20;
-      circle(k[i].x, k[i].y, tip ? 14 : 9);
+      circle(k[i].x, k[i].y, i > 0 && i % 4 === 0 ? 14 : 9);
     }
 
     // Pinching: a glowing dot between thumb and index
@@ -820,7 +681,7 @@ function drawBossyTip() {
 
 
 // ---------------------------------------------------------------------
-// 13. Keyboard
+// 11. Keyboard
 // ---------------------------------------------------------------------
 
 // Built into p5: runs when a key is pressed. Press C to clear all frames.
